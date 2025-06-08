@@ -156,7 +156,7 @@ class WikipediaSampleProcessor:
         except Exception as e:
             print(f"Error parsing wikitext: {e}")
             return {
-                'content': wikitext[:1000],  # fallback לטקסט גולמי
+                'content': self.normalize_text_for_training(wikitext[:1000]),
                 'summary': '',
                 'categories': [],
                 'infobox': '',
@@ -180,20 +180,50 @@ class WikipediaSampleProcessor:
             'tables': tables
         }
 
+    def normalize_text_for_training(self, text):
+        """
+        מנרמל טקסט לאימון מודל שפה:
+        - מחק כל שורות חדשות
+        - מחק טאבים
+        - רווחים מרובים → רווח יחיד
+        - שמור רק את התוכן האמיתי
+        """
+        if not text or not isinstance(text, str):
+            return text
+
+        # מחק שורות חדשות ו-\r
+        text = text.replace('\n', ' ')
+        text = text.replace('\r', ' ')
+        text = text.replace('\t', ' ')
+
+        # מחק כל תווי בריחה אחרים
+        text = text.replace('\\n', ' ')
+        text = text.replace('\\t', ' ')
+        text = text.replace('\\r', ' ')
+        text = text.replace('\\"', '"')
+        text = text.replace("\\'", "'")
+        text = text.replace('\\\\', '\\')
+
+        # רווחים מרובים → רווח יחיד
+        text = re.sub(r'\s+', ' ', text)
+
+        # נקה רווחים בהתחלה/סוף
+        text = text.strip()
+
+        return text
+
     def clean_content(self, wikicode):
-        """ניקוי תוכן משופר"""
+        """ניקוי תוכן - גרסה מנורמלת לאימון"""
         try:
-            # רשימה מורחבת של תבניות להסרה
+            # הסרת תבניות
             templates_to_remove = []
             for template in wikicode.filter_templates():
                 template_name = str(template.name).strip().lower()
-
                 # תבניות להסרה מלאה
                 remove_patterns = [
                     'cite', 'צ-', 'הערה', 'מקור', 'reflist', 'מקורות',
                     'ציון', 'ref', 'citation', 'web', 'news', 'book', 'journal'
                 ]
-
                 if any(pattern in template_name for pattern in remove_patterns):
                     templates_to_remove.append(template)
 
@@ -201,12 +231,8 @@ class WikipediaSampleProcessor:
             for template in templates_to_remove:
                 try:
                     wikicode.remove(template)
-                except Exception:
-                    # אם לא מצליח להסיר, לפחות נחליף בטקסט ריק
-                    try:
-                        wikicode.replace(template, "")
-                    except:
-                        pass
+                except:
+                    pass
 
             # המרת קישורים פנימיים לטקסט
             for link in wikicode.filter_wikilinks():
@@ -214,19 +240,14 @@ class WikipediaSampleProcessor:
                     if link.text:
                         wikicode.replace(link, str(link.text))
                     else:
-                        # נקה את הקישור מסוגריים
                         title = str(link.title)
                         if '|' in title:
-                            title = title.split('|')[0]  # קח רק את החלק הראשון
+                            title = title.split('|')[0]
                         wikicode.replace(link, title)
-                except Exception:
-                    # במקרה של שגיאה, פשוט הסר
-                    try:
-                        wikicode.remove(link)
-                    except:
-                        pass
+                except:
+                    pass
 
-            # טיפול בתגיות מיוחדות
+            # הסרת תגיות
             for tag in wikicode.filter_tags():
                 try:
                     if tag.tag.lower() in ['math', 'chem']:
@@ -239,32 +260,95 @@ class WikipediaSampleProcessor:
             # המרת הכל לטקסט
             content = str(wikicode.strip_code())
 
-            # ניקוי בסיסי מתקדם
-            content = re.sub(r'\{\{[^}]*\}\}', '', content)  # תבניות שנשארו
-            content = re.sub(r'\[\[[^]]*\]\]', '', content)  # קישורים שנשארו
-            content = re.sub(r'<[^>]*>', '', content)  # תגיות HTML
-            content = re.sub(r'\n{3,}', '\n\n', content)  # שורות ריקות מרובות
-            content = re.sub(r' {2,}', ' ', content)  # רווחים מרובים
-            content = re.sub(r'^\s*=+.*?=+\s*$', '', content, flags=re.MULTILINE)  # כותרות ויקי
+            # ניקוי regex
+            content = self.apply_regex_cleaning(content)
 
-            return content.strip()
+            # זיהוי כותרות
+            content = self.identify_headers(content)
+
+            # נרמול הטקסט לאימון - זה החלק החדש!
+            content = self.normalize_text_for_training(content)
+
+            return content
 
         except Exception as e:
-            # במקרה של שגיאה חמורה, החזר טקסט בסיסי
-            try:
-                basic_clean = re.sub(r'\{\{[^}]*\}\}', '', str(wikicode))
-                basic_clean = re.sub(r'\[\[[^]]*\]\]', '', basic_clean)
-                return basic_clean[:2000]  # מגביל אורך
-            except:
-                return str(wikicode)[:1000]
+            print(f"Error in clean_content: {e}")
+            # במקרה של שגיאה
+            basic_clean = str(wikicode)[:2000]
+            return self.normalize_text_for_training(basic_clean)
+
+    def apply_regex_cleaning(self, content):
+        """ניקוי regex מרוכז"""
+        # הסרת תבניות שנשארו
+        content = re.sub(r'\{\{[^}]*\}\}', '', content)
+        # הסרת קישורים שנשארו
+        content = re.sub(r'\[\[[^]]*\]\]', '', content)
+        # הסרת תגיות HTML
+        content = re.sub(r'<[^>]*>', '', content)
+
+        # הסרת תיאורי תמונות ומדיה
+        content = re.sub(r'^(שמאל|ימין|מרכז|ממוזער)\|.*$', '', content, flags=re.MULTILINE)
+        content = re.sub(r'^\s*(שמאל|ימין|מרכז|ממוזער)\|.*$', '', content, flags=re.MULTILINE)
+
+        # הסרת הסברי שפות זרות בסוגריים
+        foreign_languages = ['בגרמנית', 'בהונגרית', 'בערבית', 'בכורדית', 'באנגלית',
+                             'בצרפתית', 'באיטלקית', 'ברוסית', 'ביוונית', 'בלטינית']
+        for lang in foreign_languages:
+            pattern = r'\(' + lang + r':.*?\)'
+            content = re.sub(pattern, '', content)
+
+        # הסרת הפניות לתמונות
+        content = re.sub(r'ראו [A-Za-z\s,]+\.', '', content)
+
+        # ניקוי כללי - נשאיר את זה כי הנרמול יטפל בהמשך
+        content = re.sub(r'\n{3,}', '\n\n', content)  # שורות ריקות מרובות
+        content = re.sub(r' {2,}', ' ', content)  # רווחים מרובים
+        content = re.sub(r'^\s*=+.*?=+\s*$', '', content, flags=re.MULTILINE)  # כותרות ויקי
+
+        return content
+
+    def identify_headers(self, content):
+        """זיהוי וסימון כותרות"""
+        lines = content.split('\n')
+        processed_lines = []
+
+        for i, line in enumerate(lines):
+            line = line.strip()
+
+            # זיהוי כותרת פשוט
+            if (line and len(line) < 100 and
+                    i < len(lines) - 1 and
+                    len(lines[i + 1].strip()) > 50 and
+                    line.count('.') <= 1 and
+                    line.count(',') <= 2):
+
+                # בדיקות נוספות לוודא שזו כותרת
+                header_keywords = ['היסטוריה', 'ביוגרפיה', 'רקע', 'תולדות', 'מוצא', 'תרבות', 'משפחתו', 'ילדותו',
+                                   'נעוריו', 'התפתחות', 'משימות']
+                if (not line.endswith('.') or
+                        any(keyword in line for keyword in header_keywords)):
+                    processed_lines.append(f"## {line}")
+                else:
+                    processed_lines.append(line)
+            else:
+                processed_lines.append(line)
+
+        return '\n'.join(processed_lines)
 
     def extract_summary(self, content):
-        """חילוץ סיכום (פסקה ראשונה)"""
+        """חילוץ סיכום - עכשיו גם מנורמל"""
+        # הסיכום ייצור מהתוכן שכבר נוקה אבל עוד לא נורמל
+        # אז נחלץ סיכום רגיל ואז ננרמל אותו
         paragraphs = content.split('\n\n')
+        summary_text = ""
+
         for paragraph in paragraphs:
             if len(paragraph.strip()) > 100:
-                return paragraph.strip()[:500]
-        return ""
+                summary_text = paragraph.strip()[:500]
+                break
+
+        # נרמול הסיכום
+        return self.normalize_text_for_training(summary_text)
 
     def extract_categories(self, wikicode):
         """חילוץ קטגוריות"""
@@ -281,34 +365,25 @@ class WikipediaSampleProcessor:
         return categories
 
     def extract_infobox(self, wikicode):
-        """חילוץ ועיבוד אינפובוקס משופר - גרסה מתקנת"""
+        """חילוץ אינפובוקס - גם מנורמל"""
         try:
             for template in wikicode.filter_templates():
                 template_name = str(template.name).lower().strip()
 
-                # דפוסים מורחבים לזיהוי אינפובוקס (כולל תבניות ספציפיות)
+                # דפוסים לזיהוי אינפובוקס
                 infobox_patterns = [
-                    # תבניות אינפובוקס כלליות
-                    'אינפו', 'infobox', 'תיבת מידע', 'קופסת מידע',
-                    'אינפובוקס', 'מידע', 'תיבה', 'קופסה',
-
-                    # תבניות ספציפיות נפוצות
+                    'אינפו', 'infobox', 'תיבת מידע', 'מידע', 'תיבה',
                     'מנהיג', 'אדם', 'עיר', 'מדינה', 'ספר', 'סרט',
-                    'חברה', 'ארגון', 'אוניברסיטה', 'בניין', 'הר',
-                    'נהר', 'אגם', 'כוכב', 'חיה', 'צמח', 'תרופה',
-                    'מחלה', 'ספורטאי', 'שחקן', 'זמר', 'כותב',
-                    'פילוסוף', 'מדען', 'רופא', 'צבא', 'מלחמה',
-                    'אירוע', 'חג', 'דת', 'שפה', 'מטבע'
+                    'חברה', 'ארגון', 'אוניברסיטה', 'בניין'
                 ]
 
-                # בדיקה אם שם התבנית מתאים לאחד מהדפוסים
                 if any(pattern in template_name for pattern in infobox_patterns):
-                    # בדיקה נוספת - לא תבניות ניווט או הערות
+                    # לא תבניות ניווט
                     exclude_patterns = ['ניווט', 'nav', 'citation', 'cite', 'ref', 'הערה']
                     if any(exclude in template_name for exclude in exclude_patterns):
                         continue
 
-                    infobox_text = f"תיבת מידע - {template.name}:\n"
+                    infobox_text = f"תיבת מידע - {template.name}: "  # שינוי: רווח במקום \n
                     param_count = 0
 
                     for param in template.params:
@@ -316,30 +391,30 @@ class WikipediaSampleProcessor:
                             param_name = str(param.name).strip()
                             param_value = str(param.value).strip()
 
-                            # סנן פרמטרים ריקים או ארוכים מדי
                             if (param_name and param_value and
-                                    len(param_value) < 300 and  # הגדלתי קצת את הגבול
+                                    len(param_value) < 300 and
                                     len(param_value) > 2 and
-                                    not param_name.isdigit()):  # לא פרמטרים מספריים (בדרך כלל לא חשובים)
+                                    not param_name.isdigit()):
 
-                                # נקה את הערך מקוד ויקי בסיסי
+                                # ניקוי בסיסי של הערך
                                 param_value = re.sub(r'\[\[([^]|]*)\|?[^]]*\]\]', r'\1', param_value)
                                 param_value = re.sub(r'\{\{[^}]*\}\}', '', param_value)
-                                param_value = re.sub(r'<[^>]*>', '', param_value)  # תגיות HTML
+                                param_value = re.sub(r'<[^>]*>', '', param_value)
                                 param_value = param_value.strip()
 
-                                if param_value:  # ודא שעדיין יש תוכן אחרי הניקוי
-                                    infobox_text += f"{param_name}: {param_value}\n"
+                                if param_value:
+                                    infobox_text += f"{param_name}: {param_value} "  # רווח במקום \n
                                     param_count += 1
 
-                                    if param_count >= 15:  # הגדלתי מ-10 ל-15
+                                    if param_count >= 15:
                                         break
 
                         except Exception:
                             continue
 
                     if param_count > 0:
-                        return infobox_text
+                        # נרמול האינפובוקס
+                        return self.normalize_text_for_training(infobox_text)
 
         except Exception as e:
             print(f"Error extracting infobox: {e}")
@@ -350,11 +425,10 @@ class WikipediaSampleProcessor:
         """חילוץ טבלאות (פשוט)"""
         tables = []
         try:
-            # זיהוי טבלאות בסיסי
             content = str(wikicode)
             table_matches = re.findall(r'\{\|.*?\|\}', content, re.DOTALL)
-            for i, table in enumerate(table_matches[:3]):  # מקסימום 3 טבלאות
-                if len(table) < 1000:  # טבלאות קטנות בלבד
+            for i, table in enumerate(table_matches[:3]):
+                if len(table) < 1000:
                     tables.append(f"טבלה {i + 1}: [מידע מטבלה]")
         except Exception as e:
             print(f"Error extracting tables: {e}")
@@ -421,14 +495,11 @@ class WikipediaSampleProcessor:
         print(f"📋 With infobox: {with_infobox}")
         print(f"🏷️ With categories: {with_categories}")
 
-        # דוגמאות איכות
-        if high_quality > 0:
-            best_article = max(self.articles, key=lambda x: x['quality_score'])
-            print(f"\n🏆 Best article: '{best_article['title'][:30]}...' (Score: {best_article['quality_score']})")
-
-        if low_quality > 0:
-            worst_article = min(self.articles, key=lambda x: x['quality_score'])
-            print(f"🔻 Worst article: '{worst_article['title'][:30]}...' (Score: {worst_article['quality_score']})")
+        # דוגמה מנורמלת
+        if self.articles:
+            first_article = self.articles[0]
+            print(f"\n📄 דוגמה מנורמלת (100 תווים ראשונים):")
+            print(f"'{first_article['content'][:100]}...'")
 
     def save_sample(self):
         """שמירת הדגימה"""
@@ -451,7 +522,8 @@ class WikipediaSampleProcessor:
                 'high_80_plus': len([q for q in qualities if q >= 80]),
                 'medium_60_79': len([q for q in qualities if 60 <= q < 80]),
                 'low_below_60': len([q for q in qualities if q < 60])
-            }
+            },
+            'text_format': 'normalized_for_training'  # מידע על הפורמט
         }
 
         output_data = {
@@ -468,10 +540,12 @@ class WikipediaSampleProcessor:
         print(f"⭐ Average quality: {metadata['average_quality']:.1f}")
         print(f"📋 Articles with infobox: {metadata['articles_with_infobox']}")
         print(f"🏷️ Articles with categories: {metadata['articles_with_categories']}")
+        print(f"🔄 Text format: Normalized for training (no newlines)")
 
     def run_sample(self):
         """הרצת המדגם המלא"""
         print("🚀 Starting Wikipedia Hebrew sample processing...")
+        print("🔄 Using normalized text format (no newlines) for training")
         print("=" * 60)
 
         # שלב 1: אוסף דפים תקינים
@@ -505,13 +579,14 @@ class WikipediaSampleProcessor:
         self.save_sample()
 
         print("\n🎉 Sample processing completed successfully!")
+        print("📋 Text is normalized for training - no newlines or escape characters")
 
 
 # שימוש
 if __name__ == "__main__":
     processor = WikipediaSampleProcessor(
-        dump_path=r'C:\Users\Dan Revital\OneDrive\Documents\gepeta\data\wikipedia\hewiki-latest-pages-articles.xml.bz2',  # שנה לנתיב הנכון
-        output_file=r'C:\Users\Dan Revital\OneDrive\Documents\gepeta\load_wikipedia\hebrew_wiki_sample_100.json',
+        dump_path=r'C:\Users\Dan Revital\OneDrive\Documents\gepeta\data\wikipedia\hewiki-latest-pages-articles.xml.bz2',
+        output_file=r'C:\Users\Dan Revital\OneDrive\Documents\gepeta\load_wikipedia\hebrew_wiki_sample_100_normalized.json',
         sample_size=100
     )
 
