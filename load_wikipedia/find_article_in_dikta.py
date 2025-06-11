@@ -56,18 +56,33 @@ def search_article_in_file(bucket_name, filename, article_title):
     """
     print(f"🔍 מחפש '{article_title}' בקובץ: {filename}")
 
-    s3 = boto3.client('s3')
+    # הגדרת תיקיית ההורדה
+    download_dir = Path(".")
+    download_dir.mkdir(exist_ok=True)
+
+    local_filename = download_dir / Path(filename).name
+
+    # בדיקה אם הקובץ כבר קיים מקומית
+    if local_filename.exists():
+        print(f"✅ הקובץ כבר קיים מקומית: {local_filename}")
+        file_size_mb = local_filename.stat().st_size / (1024 * 1024)
+        print(f"📊 גודל הקובץ: {file_size_mb:.2f} MB")
+    else:
+        # הורדת הקובץ מ-S3
+        print(f"⬇️ מוריד קובץ מ-S3...")
+        s3 = boto3.client('s3')
+        try:
+            s3.download_file(bucket_name, filename, str(local_filename))
+            file_size_mb = local_filename.stat().st_size / (1024 * 1024)
+            print(f"✅ הקובץ הורד: {local_filename} ({file_size_mb:.2f} MB)")
+        except Exception as e:
+            print(f"❌ שגיאה בהורדת הקובץ: {e}")
+            return None
 
     try:
-        # הורדת הקובץ
-        print(f"⬇️ מוריד קובץ...")
-        local_filename = Path(filename).name
-        s3.download_file(bucket_name, filename, local_filename)
-        print(f"✅ הקובץ הורד: {local_filename}")
-
         # קריאת הקובץ (נניח שזה CSV)
         print(f"📖 קורא קובץ...")
-        if filename.endswith('.csv'):
+        if str(local_filename).endswith('.csv'):
             df = pd.read_csv(local_filename)
             print(f"📊 נטען CSV עם {len(df)} שורות")
             print(f"📋 עמודות: {list(df.columns)}")
@@ -76,8 +91,8 @@ def search_article_in_file(bucket_name, filename, article_title):
             article_found = search_in_dataframe(df, article_title)
             return article_found
 
-        elif filename.endswith('.json') or filename.endswith('.jsonl'):
-            return search_in_json_file(local_filename, article_title)
+        elif str(local_filename).endswith('.json') or str(local_filename).endswith('.jsonl'):
+            return search_in_json_file(str(local_filename), article_title)
 
         else:
             print(f"❓ פורמט קובץ לא מזוהה: {filename}")
@@ -106,10 +121,10 @@ def search_in_dataframe(df, article_title):
     found_articles = []
 
     for idx, row in df.iterrows():
-        text_content = str(row['text'])
+        text_content = str(row['text']).strip()
 
-        # בדיקה אם הטקסט מתחיל עם שם הערך
-        if text_content.strip().startswith(article_title):
+        # בדיקה מדויקת שהטקסט מתחיל עם שם הערך כמילה שלמה
+        if is_exact_title_match(text_content, article_title):
             found_articles.append((idx, text_content))
             print(f"✅ נמצא! שורה {idx}")
             print(f"📄 תחילת הטקסט: {text_content[:100]}...")
@@ -139,7 +154,7 @@ def search_in_dataframe(df, article_title):
 
         return content
     else:
-        print(f"❌ לא נמצא ערך שמתחיל ב-'{article_title}'")
+        print(f"❌ לא נמצא ערך שמתחיל ב-'{article_title}' כמילה שלמה")
 
         # בדיקה אם יש ערכים דומים
         print(f"🔍 מחפש ערכים דומים...")
@@ -149,7 +164,7 @@ def search_in_dataframe(df, article_title):
             text_content = str(row['text'])
             first_line = text_content.split('\n')[0].strip()
 
-            # בדיקה אם יש מילים דומות
+            # בדיקה אם יש מילים דומות (לא מדויקת)
             if article_title.lower() in first_line.lower():
                 similar_articles.append((idx, first_line))
                 if len(similar_articles) >= 5:  # מקסימום 5 דוגמאות
@@ -163,6 +178,58 @@ def search_in_dataframe(df, article_title):
             print(f"💡 לא נמצאו ערכים דומים")
 
         return None
+
+
+def is_exact_title_match(text_content, article_title):
+    """
+    בודק אם הטקסט מתחיל בדיוק עם כותרת הערך כמילה שלמה
+    """
+    import re
+
+    # נקה רווחים מיותרים
+    text_content = text_content.strip()
+    article_title = article_title.strip()
+
+    # בדיקה פשוטה - האם הטקסט מתחיל עם הכותרת
+    if not text_content.startswith(article_title):
+        return False
+
+    # בדיקה שאחרי הכותרת יש סימן עצירה או רווח
+    if len(text_content) == len(article_title):
+        # הטקסט זהה לכותרת בדיוק
+        return True
+
+    # התו הבא אחרי הכותרת
+    next_char = text_content[len(article_title)]
+
+    # רשימת תווים שמותרים אחרי כותרת ערך
+    allowed_chars = [
+        ' ',  # רווח
+        '\t',  # טאב
+        '\n',  # שורה חדשה
+        '.',  # נקודה
+        ',',  # פסיק
+        ':',  # נקודותיים
+        ';',  # פסיק עליון
+        '!',  # קריאה
+        '?',  # שאלה
+        '(',  # סוגריים
+        '[',  # סוגריים מרובעים
+        '-',  # מקף
+        '–',  # מקף ארוך
+        '—',  # מקף ארוך יותר
+        "'",  # גרש - לציון צלילים זרים בעברית (ג', ז', צ')
+    ]
+
+    if next_char in allowed_chars:
+        return True
+
+    # בדיקה נוספת עם regex לוודא שזו מילה שלמה
+    pattern = r'^' + re.escape(article_title) + r'(?=\s|[^\w]|$)'
+    if re.match(pattern, text_content, re.UNICODE):
+        return True
+
+    return False
 
 
 def search_in_json_file(filename, article_title):
@@ -234,7 +301,7 @@ def main():
     # הגדרות
     bucket_name = 'israllm-datasets'
     prefix = 'csv-dataset/AllOfNewHebrewWikipediaWithArticles'
-    article_title = 'הבינום של ניוטון'
+    article_title = 'רמת גן'
 
     print(f"🔍 מחפש ערך: '{article_title}'")
     print(f"📂 ב-S3: {bucket_name}/{prefix}")

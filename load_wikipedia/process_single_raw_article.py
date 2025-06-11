@@ -255,7 +255,7 @@ def main():
 
     # הגדרות
     dump_path = r'C:\Users\Dan Revital\OneDrive\Documents\gepeta\data\wikipedia\hewiki-latest-pages-articles.xml.bz2'
-    article_title = 'הבינום של ניוטון'
+    article_title = 'רמת גן'
 
     print(f"🔍 מחפש ערך: '{article_title}'")
     print(f"📂 בדאמפ: {dump_path}")
